@@ -4,6 +4,17 @@ import type { TokenData } from "./types.js";
 const TOKEN_FILE = "/tmp/whoop_tokens.json";
 const WHOOP_TOKEN_URL = "https://api.prod.whoop.com/oauth/oauth2/token";
 
+// ─── Refresh mutex ────────────────────────────────────────────────────────────
+// Prevents the race condition where multiple parallel API calls all detect an
+// expired token simultaneously and each fire a refresh. Whoop uses rotating
+// refresh tokens — only the first refresh succeeds; all others get 400 because
+// the token has already been invalidated by the first call.
+//
+// Pattern: one Promise is stored while a refresh is in flight. All concurrent
+// callers await the same Promise and share the result.
+
+let refreshInFlight: Promise<TokenData> | null = null;
+
 // ─── Persistence ─────────────────────────────────────────────────────────────
 
 export function saveTokens(data: TokenData): void {
@@ -83,23 +94,31 @@ export async function refreshAccessToken(refreshToken: string): Promise<TokenDat
   return tokens;
 }
 
-// ─── Ensure valid access token ────────────────────────────────────────────────
+// ─── Ensure valid access token (with mutex) ───────────────────────────────────
 
 export async function getValidAccessToken(): Promise<string> {
   let tokens = loadTokens();
 
   if (!tokens) {
-    throw new Error(
-      "No tokens found. Visit /auth to authorize with Whoop."
-    );
+    throw new Error("No tokens found. Visit /auth to authorize with Whoop.");
   }
 
-  // Refresh if expired or expiring within 5 minutes
-  if (tokens.expiresAt < Date.now() + 5 * 60 * 1000) {
+  // Token is still valid — return immediately
+  if (tokens.expiresAt >= Date.now() + 5 * 60 * 1000) {
+    return tokens.accessToken;
+  }
+
+  // Token is expired or expiring — serialize refreshes via mutex
+  if (!refreshInFlight) {
     console.log("[token] Access token expired, refreshing...");
-    tokens = await refreshAccessToken(tokens.refreshToken);
+    refreshInFlight = refreshAccessToken(tokens.refreshToken).finally(() => {
+      refreshInFlight = null;
+    });
+  } else {
+    console.log("[token] Refresh already in flight, waiting...");
   }
 
+  tokens = await refreshInFlight;
   return tokens.accessToken;
 }
 
@@ -111,7 +130,8 @@ async function updateRailwayRefreshToken(newRefreshToken: string): Promise<void>
   const environmentId = process.env.RAILWAY_ENVIRONMENT_ID;
 
   if (!railwayToken || !serviceId || !environmentId) {
-    console.warn("[token] Railway env vars not set — skipping refresh token persistence");
+    console.warn("[token] RAILWAY_SERVICE_ID or RAILWAY_ENVIRONMENT_ID not set — skipping refresh token persistence");
+    console.warn("[token] Add these vars to Railway to enable automatic token persistence across redeploys");
     return;
   }
 
