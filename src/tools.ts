@@ -1,6 +1,7 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 import { readCache, refreshCache } from "./cache.js";
+import type { WhoopSportMap } from "./types.js";
 
 function fmt(n: number | null | undefined, decimals = 1): string {
   if (n == null) return "N/A";
@@ -16,6 +17,36 @@ function cacheAge(cachedAt: string): string {
   const mins = Math.round((Date.now() - new Date(cachedAt).getTime()) / 60000);
   if (mins < 60) return `${mins}m ago`;
   return `${Math.round(mins / 60)}h ago`;
+}
+
+// ─── Time formatting helpers ──────────────────────────────────────────────────
+
+// Parse ISO timestamp and timezone_offset (+HH:MM or -HH:MM) into local HHMM
+function toLocalHHMM(iso: string, tzOffset: string): string {
+  try {
+    const utcMs = new Date(iso).getTime();
+    // Parse offset: "+05:30" or "-05:00"
+    const match = tzOffset.match(/^([+-])(\d{2}):(\d{2})$/);
+    if (!match) return "----";
+    const sign = match[1] === "+" ? 1 : -1;
+    const offsetMs = sign * (parseInt(match[2]) * 60 + parseInt(match[3])) * 60000;
+    const localMs = utcMs + offsetMs;
+    const d = new Date(localMs);
+    const hh = String(d.getUTCHours()).padStart(2, "0");
+    const mm = String(d.getUTCMinutes()).padStart(2, "0");
+    return `${hh}${mm}`;
+  } catch {
+    return "----";
+  }
+}
+
+function durationMin(startIso: string, endIso: string): number {
+  return Math.round((new Date(endIso).getTime() - new Date(startIso).getTime()) / 60000);
+}
+
+// ─── Sport name lookup ────────────────────────────────────────────────────────
+function sportName(sportId: number, map: WhoopSportMap): string {
+  return map[sportId] ?? `Unknown (${sportId})`;
 }
 
 export function registerTools(server: McpServer): void {
@@ -216,9 +247,10 @@ Stage targets: REM >20% of total, SWS >15% of total. Performance <85% suggests i
     "whoop_strain",
     {
       title: "Whoop Strain & Workouts",
-      description: `Day strain score plus details on recent workouts (up to 5): sport, strain, HR zones, kilojoules, and distance.
+      description: `Day strain score plus details on recent workouts (up to 5): sport name, start/end time, duration, strain, HR range (min/avg/max), kilojoules, and distance.
 
-Strain scale: 0-10 light, 10-14 moderate, 14-18 hard, 18-21 all out. Compare against recovery score to assess training readiness.`,
+Strain scale: 0-10 light, 10-14 moderate, 14-18 hard, 18-21 all out. Compare against recovery score to assess training readiness.
+Incomplete records (missing score data) are included and flagged with a warning.`,
       inputSchema: {},
       annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false },
     },
@@ -229,11 +261,31 @@ Strain scale: 0-10 light, 10-14 moderate, 14-18 hard, 18-21 all out. Compare aga
       }
 
       const { cycle, workouts } = cache;
+      // Fall back to empty map if cache predates sport_map addition
+      const smap: WhoopSportMap = cache.sport_map ?? {};
 
       const workoutLines = workouts.length === 0
         ? ["  No workouts recorded"]
         : workouts.map((w, i) => {
-            const z = w.score?.zone_duration;
+            const name = sportName(w.sport_id, smap);
+            const tz = w.timezone_offset ?? "+00:00";
+            const startTime = toLocalHHMM(w.start, tz);
+            const endTime = toLocalHHMM(w.end, tz);
+            const dur = durationMin(w.start, w.end);
+            const header = `  ${i + 1}. ${w.start.split("T")[0]} | ${name} | ${startTime}-${endTime} (${dur} min)`;
+
+            if (!w.score) {
+              return [
+                header + " | ⚠ incomplete record",
+                "     Strain: — | Avg HR: — | Max HR: — | Min HR: —",
+                "     Energy: —",
+              ].join("\n");
+            }
+
+            const sc = w.score;
+            const minHR = sc.min_heart_rate != null ? fmt(sc.min_heart_rate, 0) : "—";
+
+            const z = sc.zone_duration;
             const zones = z ? [
               "z1=" + fmt(msToHours(z.zone_one_milli)) + "h",
               "z2=" + fmt(msToHours(z.zone_two_milli)) + "h",
@@ -243,10 +295,10 @@ Strain scale: 0-10 light, 10-14 moderate, 14-18 hard, 18-21 all out. Compare aga
             ].join(" ") : "";
 
             return [
-              "  " + (i + 1) + ". " + w.start.split("T")[0] + " | Sport ID: " + w.sport_id,
-              "     Strain: " + fmt(w.score?.strain) + " | Avg HR: " + fmt(w.score?.average_heart_rate, 0) + " | Max HR: " + fmt(w.score?.max_heart_rate, 0),
-              "     Energy: " + fmt(w.score?.kilojoule, 0) + " kJ" + (w.score?.distance_meter ? " | Dist: " + fmt(w.score.distance_meter / 1000) + " km" : ""),
-              zones ? "     HR Zones: " + zones : "",
+              header,
+              `     Strain: ${fmt(sc.strain)} | Avg HR: ${fmt(sc.average_heart_rate, 0)} | Max HR: ${fmt(sc.max_heart_rate, 0)} | Min HR: ${minHR}`,
+              `     Energy: ${fmt(sc.kilojoule, 0)} kJ` + (sc.distance_meter ? ` | Dist: ${fmt(sc.distance_meter / 1000)} km` : ""),
+              zones ? `     HR Zones: ${zones}` : "",
             ].filter(Boolean).join("\n");
           });
 
@@ -270,15 +322,24 @@ Strain scale: 0-10 light, 10-14 moderate, 14-18 hard, 18-21 all out. Compare aga
           cached_at: cache.cached_at,
           day_strain: cycle?.score?.strain ?? null,
           kilojoule: cycle?.score?.kilojoule ?? null,
-          workouts: workouts.map(w => ({
-            date: w.start.split("T")[0],
-            sport_id: w.sport_id,
-            strain: w.score?.strain ?? null,
-            avg_hr: w.score?.average_heart_rate ?? null,
-            max_hr: w.score?.max_heart_rate ?? null,
-            kilojoule: w.score?.kilojoule ?? null,
-            distance_km: w.score?.distance_meter ? w.score.distance_meter / 1000 : null,
-          })),
+          workouts: workouts.map(w => {
+            const tz = w.timezone_offset ?? "+00:00";
+            return {
+              date: w.start.split("T")[0],
+              start_time: toLocalHHMM(w.start, tz),
+              end_time: toLocalHHMM(w.end, tz),
+              duration_min: durationMin(w.start, w.end),
+              sport_id: w.sport_id,
+              sport_name: sportName(w.sport_id, smap),
+              incomplete: !w.score,
+              strain: w.score?.strain ?? null,
+              avg_hr: w.score?.average_heart_rate ?? null,
+              max_hr: w.score?.max_heart_rate ?? null,
+              min_hr: w.score?.min_heart_rate ?? null,
+              kilojoule: w.score?.kilojoule ?? null,
+              distance_km: w.score?.distance_meter ? w.score.distance_meter / 1000 : null,
+            };
+          }),
         },
       };
     }
