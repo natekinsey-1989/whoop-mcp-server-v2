@@ -52,7 +52,12 @@ export interface WhoopSleepStageSummary {
 
 export interface WhoopSleepScore {
   stage_summary: WhoopSleepStageSummary;
-  sleep_needed: { baseline_milli: number; need_from_sleep_debt_milli: number; need_from_recent_strain_milli: number; need_from_recent_nap_milli: number };
+  sleep_needed: {
+    baseline_milli: number;
+    need_from_sleep_debt_milli: number;
+    need_from_recent_strain_milli: number;
+    need_from_recent_nap_milli: number;
+  };
   respiratory_rate: number;
   sleep_performance_percentage: number;
   sleep_consistency_percentage: number;
@@ -72,6 +77,7 @@ export interface WhoopWorkoutScore {
   strain: number;
   average_heart_rate: number;
   max_heart_rate: number;
+  min_heart_rate: number | null;  // added
   kilojoule: number;
   percent_recorded: number;
   distance_meter: number | null;
@@ -112,6 +118,9 @@ export interface WhoopBodyMeasurement {
   max_heart_rate: number;
 }
 
+// Sport ID → name lookup map
+export type WhoopSportMap = Record<number, string>;
+
 // Cached data shape written to disk daily
 export interface WhoopDailyCache {
   cached_at: string; // ISO timestamp
@@ -121,6 +130,7 @@ export interface WhoopDailyCache {
   workouts: WhoopWorkout[];
   profile: WhoopProfile | null;
   body: WhoopBodyMeasurement | null;
+  sport_map: WhoopSportMap; // added
 }
 
 // Paginated API list response
