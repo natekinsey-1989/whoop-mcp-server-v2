@@ -7,6 +7,7 @@ import {
   fetchRecentWorkouts,
   fetchProfile,
   fetchBodyMeasurement,
+  fetchSportMap,
 } from "./whoop.js";
 
 const CACHE_FILE = "/tmp/whoop_cache.json";
@@ -38,13 +39,14 @@ export function writeCache(data: WhoopDailyCache): void {
 export async function refreshCache(): Promise<WhoopDailyCache> {
   console.log("[cache] Refreshing from Whoop API...");
 
-  const [cycle, recovery, sleep, workouts, profile, body] = await Promise.all([
+  const [cycle, recovery, sleep, workouts, profile, body, sport_map] = await Promise.all([
     fetchLatestCycle(),
     fetchLatestRecovery(),
     fetchLatestSleep(),
     fetchRecentWorkouts(5),
     fetchProfile(),
     fetchBodyMeasurement(),
+    fetchSportMap(),
   ]);
 
   const data: WhoopDailyCache = {
@@ -55,6 +57,7 @@ export async function refreshCache(): Promise<WhoopDailyCache> {
     workouts,
     profile,
     body,
+    sport_map,
   };
 
   writeCache(data);
